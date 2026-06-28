@@ -1,16 +1,21 @@
+import os
 import re
+import asyncio
+import logging
 import requests
 from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-import logging
 
-# ---------- CONFIG ----------
-TELEGRAM_TOKEN = "YOUR_BOT_TOKEN"
-CHECK_INTERVAL = 300  # 5 minutes
-MIN_MC = 5000
-MAX_MC = 500000
-AGE_HOURS = 24
+# ---------- CONFIG (from env or defaults) ----------
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN")
+if TELEGRAM_TOKEN == "YOUR_BOT_TOKEN":
+    raise ValueError("Set TELEGRAM_TOKEN environment variable!")
+
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 300))  # seconds
+MIN_MC = int(os.environ.get("MIN_MC", 5000))
+MAX_MC = int(os.environ.get("MAX_MC", 500000))
+AGE_HOURS = int(os.environ.get("AGE_HOURS", 24))
 
 logging.basicConfig(level=logging.INFO)
 
@@ -32,7 +37,7 @@ def fetch_new_pairs(chain: str):
     for row in rows:
         row_text = row.get_text(" ", strip=True)
 
-        # ---- Extract Market Cap ----
+        # ---- Market Cap ----
         mc_match = re.search(r'\$(\d+\.?\d*)([kmb]?)', row_text, re.I)
         if not mc_match:
             continue
@@ -63,7 +68,7 @@ def fetch_new_pairs(chain: str):
             elif href.startswith("http") and not ("t.me" in href or "twitter.com" in href):
                 has_website = True
 
-        # Condition: must have TG + Twitter, but NO website
+        # Must have TG + Twitter, NO website
         if not (tg_link and has_twitter) or has_website:
             continue
 
@@ -83,18 +88,16 @@ def fetch_new_pairs(chain: str):
             if age_sec > AGE_HOURS * 3600:
                 continue
         else:
-            # If we can't parse age, skip to be safe (or set to True if you want to keep)
-            continue
+            continue  # skip if we can't verify age
 
         found.append({
-            "name": row_text[:30],  # just a snippet for log
             "tg": tg_link,
             "mc": mc,
         })
 
     return found
 
-# ---------- BOT HANDLERS ----------
+# ---------- BOT COMMANDS ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "chain" not in context.bot_data:
         context.bot_data["chain"] = "solana"
@@ -116,7 +119,7 @@ async def set_chain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     new_chain = context.args[0].lower()
     context.bot_data["chain"] = new_chain
-    context.bot_data["seen"] = set()  # reset seen list for new chain
+    context.bot_data["seen"] = set()
     await update.message.reply_text(f"✅ Chain switched to **{new_chain}**")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,17 +154,15 @@ async def scan_and_send(context: ContextTypes.DEFAULT_TYPE):
             text=pair["tg"]
         )
         seen.add(pair["tg"])
-        await asyncio.sleep(0.5)  # avoid flood
+        await asyncio.sleep(0.5)
 
     context.bot_data["seen"] = seen
 
 # ---------- MAIN ----------
-import asyncio
-
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Store chat_id globally so the job can send messages
+    # Store chat_id so the job knows where to send
     async def store_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data["chat_id"] = update.effective_chat.id
 
@@ -171,11 +172,11 @@ def main():
     app.add_handler(CommandHandler("scannow", scan_now))
     app.add_handler(CommandHandler("store", store_chat_id))  # internal
 
-    # Schedule the scan every CHECK_INTERVAL seconds
+    # Schedule the scan
     job_queue = app.job_queue
     job_queue.run_repeating(scan_and_send, interval=CHECK_INTERVAL, first=10)
 
-    # Start polling
+    # Start polling (for workers, this runs forever)
     app.run_polling()
 
 if __name__ == "__main__":
